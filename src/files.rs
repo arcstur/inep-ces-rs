@@ -1,11 +1,13 @@
 use reqwest::ClientBuilder;
 use std::io::{Cursor, Read};
+use std::path::Path;
 use tokio::fs;
 use tokio::task::JoinSet;
 use zip::ZipArchive;
 
-const MICRODATA_PREFIX: &str = "MICRODADOS_CADASTRO_";
+const MICRODATA_PREFIX: &str = "MICRODADOS_CADASTRO";
 
+#[derive(Debug, Clone, Copy)]
 pub struct Ces {
     year: u16,
 }
@@ -23,13 +25,13 @@ impl Ces {
 
         while let Some(res) = set.join_next().await {
             res.map_err(|e| {
-                log::error!("The data download for one year failed: {}", e);
+                log::error!("The data for one year failed: {}", e);
                 e
             })
             .unwrap();
         }
 
-        log::info!("All files were downloaded successfully!");
+        log::info!("All files are ok!");
 
         Ok(())
     }
@@ -59,11 +61,33 @@ impl Ces {
 
     /// Ensures that input data for this Ces is downloaded.
     pub async fn ensure_data(&self) -> anyhow::Result<()> {
+        if self.already_downloaded().await? {
+            log::debug!("[{}] data already exists.", self.year());
+        } else {
+            log::debug!("[{}]", self.year());
+            self.download_data().await?;
+        }
+        Ok(())
+    }
+
+    async fn already_downloaded(&self) -> anyhow::Result<bool> {
+        let path_string = self.path(Microdata::Cursos);
+        Ok(Path::new(&path_string).try_exists()?)
+    }
+
+    fn path(&self, kind: Microdata) -> String {
+        match kind {
+            Microdata::Cursos => format!("input/cursos.{}.csv", self.year()),
+        }
+    }
+
+    async fn download_data(self) -> anyhow::Result<()> {
         let zip = self.zip().await?;
 
         log::debug!("[{}] extracting zip files...", self.year());
         let cursos =
-            tokio::task::spawn_blocking(move || extract_cursos_microdata(zip).unwrap()).await?;
+            tokio::task::spawn_blocking(move || self.extract_cursos_microdata(zip).unwrap())
+                .await?;
         self.save_cursos(cursos).await?;
 
         log::info!("[{}] data downloaded!", self.year());
@@ -87,6 +111,39 @@ impl Ces {
         Ok(client.get(self.url()).send().await?.bytes().await?.to_vec())
     }
 
+    fn extract_cursos_microdata(&self, zip: Vec<u8>) -> anyhow::Result<String> {
+        log::trace!("extract_cursos_microdata");
+        let mut archive = ZipArchive::new(Cursor::new(zip))?;
+        let names: Vec<String> = archive
+            .file_names()
+            .filter(|name| name.contains(MICRODATA_PREFIX))
+            .filter(|name| name.contains(Microdata::Cursos.name()))
+            .map(String::from)
+            .collect();
+
+        for name in names {
+            let mut zip_file = archive
+                .by_name(&name)
+                .expect("Using name provided by `file_names`");
+            let mut bytes = Vec::new();
+            zip_file.read_to_end(&mut bytes)?;
+
+            let clone = bytes.clone();
+            let downloaded_md5 = format!("{:x}", md5::compute(clone));
+            let correct_md5 = Microdata::Cursos.original_md5(self.year()).unwrap();
+            if downloaded_md5 != correct_md5 {
+                dbg!(self.year(), downloaded_md5, correct_md5);
+                anyhow::bail!("[{}], wrong md5", self.year());
+            } else {
+                log::debug!("[{}] correct md5", self.year());
+            }
+
+            let string = iso_8559_1_to_utf8(bytes);
+            return Ok(string);
+        }
+        anyhow::bail!("Cursos microdata wasn't found");
+    }
+
     async fn save_cursos(&self, s: String) -> std::io::Result<()> {
         fs::write(format!("input/cursos.{}.csv", self.year()), s).await
     }
@@ -98,28 +155,6 @@ fn iso_8559_1_to_utf8(bytes: Vec<u8>) -> String {
     bytes.iter().map(|&c| c as char).collect()
 }
 
-fn extract_cursos_microdata(zip: Vec<u8>) -> anyhow::Result<String> {
-    log::trace!("extract_cursos_microdata");
-    let mut archive = ZipArchive::new(Cursor::new(zip))?;
-    let names: Vec<String> = archive
-        .file_names()
-        .filter(|name| name.contains(MICRODATA_PREFIX))
-        .map(String::from)
-        .collect();
-    for name in names {
-        let mut zip_file = archive
-            .by_name(&name)
-            .expect("Using name provided by `file_names`");
-        let mut bytes = Vec::new();
-        zip_file.read_to_end(&mut bytes)?;
-        let string = iso_8559_1_to_utf8(bytes);
-        if string.contains(Microdata::Cursos.name()) {
-            return Ok(string);
-        }
-    }
-    anyhow::bail!("Cursos microdata wasn't found");
-}
-
 enum Microdata {
     Cursos,
 }
@@ -128,6 +163,27 @@ impl Microdata {
     fn name(&self) -> &str {
         match self {
             Self::Cursos => "CURSOS",
+        }
+    }
+
+    fn original_md5(&self, year: u16) -> Option<&str> {
+        match self {
+            Self::Cursos => match year {
+                2009 => Some("677421fb8ad9442370175cbadae05b77"),
+                2010 => Some("8ea106ef7dc41a27a43b9f246cfd3ffd"),
+                2011 => Some("f626dd6d17e8f31f78ddf90f680ace48"),
+                2012 => Some("f896c4a4e2b10adcf846d91486ab0ce8"),
+                2013 => Some("2bbfbe1a9afe1fe5d0d7384901ae3b7e"),
+                2014 => Some("bf70eb93a2a5cce0e0a48295c4834c20"),
+                2015 => Some("b5bd1b6b10b4f66f359deed4ac48cb80"),
+                2016 => Some("a9475f5f6815a5befb8bc91b8e2c7b1c"),
+                2017 => Some("af97168b2d83b0e4b6c1572e619c183b"),
+                2018 => Some("b852881daa9328e4ff3f3a2c6115ba51"),
+                2019 => Some("f80ea1eddafae4780728e6fb26aa549f"),
+                2020 => Some("a84c1efeedd8bcec4848ec8217b92b98"),
+                2021 => Some("05d78ff911cea316cd65f08b0e93e83d"),
+                _ => None,
+            },
         }
     }
 }
