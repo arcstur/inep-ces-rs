@@ -1,3 +1,4 @@
+use polars::prelude::{LazyCsvReader, LazyFileListReader, LazyFrame, PolarsError};
 use reqwest::ClientBuilder;
 use std::io::{Cursor, Read};
 use std::path::Path;
@@ -10,6 +11,39 @@ const MICRODATA_PREFIX: &str = "MICRODADOS_CADASTRO";
 #[derive(Debug, Clone, Copy)]
 pub struct Ces {
     year: u16,
+}
+
+impl Ces {
+    /// Get a `Vec` of all `Ces` available.
+    pub fn all() -> Vec<Ces> {
+        (2009..2022).map(|year| Ces::new(year)).collect()
+    }
+
+    /// Creates a new object holding a
+    /// Censo da Educação Superior information for a given year.
+    ///
+    /// # Panics
+    /// Panic if input `year` is less than 2009, given that before this year
+    /// the data has a different structure.
+    pub fn new(year: u16) -> Ces {
+        if year < 2009 {
+            panic!("Years before 2009 are not suppported in this software yet.")
+        } else {
+            Ces { year }
+        }
+    }
+
+    pub fn year(&self) -> u16 {
+        self.year
+    }
+}
+
+impl Ces {
+    pub fn lf_cursos(&self) -> Result<LazyFrame, PolarsError> {
+        LazyCsvReader::new(&self.path(Microdata::Cursos))
+            .with_delimiter(b';')
+            .finish()
+    }
 }
 
 impl Ces {
@@ -34,29 +68,6 @@ impl Ces {
         log::info!("All files are ok!");
 
         Ok(())
-    }
-
-    /// Get a `Vec` of all `Ces` available.
-    pub fn all() -> Vec<Ces> {
-        (2009..2022).map(|year| Ces::new(year)).collect()
-    }
-
-    /// Creates a new object holding a
-    /// Censo da Educação Superior information for a given year.
-    ///
-    /// # Panics
-    /// Panic if input `year` is less than 2009, given that before this year
-    /// the data has a different structure.
-    pub fn new(year: u16) -> Ces {
-        if year < 2009 {
-            panic!("Years before 2009 are not suppported in this software yet.")
-        } else {
-            Ces { year }
-        }
-    }
-
-    pub fn year(&self) -> u16 {
-        self.year
     }
 
     /// Ensures that input data for this Ces is downloaded.
@@ -101,7 +112,7 @@ impl Ces {
         )
     }
 
-    pub async fn zip(&self) -> reqwest::Result<Vec<u8>> {
+    async fn zip(&self) -> reqwest::Result<Vec<u8>> {
         // TODO: find a way to store the server's certificate here, because
         // it seems that when downloading the file it doesn't send the certificate
         log::debug!("[{}] Sending request to {}", self.year, self.url());
@@ -145,7 +156,10 @@ impl Ces {
     }
 
     async fn save_cursos(&self, s: String) -> std::io::Result<()> {
-        fs::write(format!("input/cursos.{}.csv", self.year()), s).await
+        let input = Path::new("./input");
+        let filename = format!("cursos.{}.csv", self.year());
+        fs::create_dir_all(&input).await?;
+        fs::write(&input.join(filename), s).await
     }
 }
 
